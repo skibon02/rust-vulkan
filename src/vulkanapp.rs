@@ -203,13 +203,14 @@ impl VulkanApp {
         let mut device_extensions = Vec::new();
         device_extensions.push(vk::KhrSwapchainFn::name().as_ptr());
 
+        let queue_create_infos = [vk::DeviceQueueCreateInfo::builder()
+            .queue_family_index(queue_family_index)
+            .queue_priorities(&[1.0])
+            .build()];
         let device_create_info = vk::DeviceCreateInfo::builder()
-            .queue_create_infos(&[vk::DeviceQueueCreateInfo::builder()
-                .queue_family_index(queue_family_index)
-                .queue_priorities(&[1.0])
-                .build()])
+            .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&device_extensions)
-            .enabled_layer_names(&validation_layers).build();
+            .enabled_layer_names(&validation_layers);
 
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None).unwrap() };
         
@@ -476,7 +477,7 @@ impl VulkanApp {
         // swapchain and image views are created
 
         let render_pass = {
-            let color_attachment = vk::AttachmentDescription::builder()
+            let color_attachments = [vk::AttachmentDescription::builder()
                 .format(surface_format.format)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -485,18 +486,18 @@ impl VulkanApp {
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .build();
-            let color_attachment_ref = vk::AttachmentReference::builder()
+                .build()];
+            let color_attachment_refs = [vk::AttachmentReference::builder()
                 .attachment(0)
                 .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .build();
-            let subpass = vk::SubpassDescription::builder()
+                .build()];
+            let subpasses = [vk::SubpassDescription::builder()
                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-                .color_attachments(&[color_attachment_ref])
-                .build();
+                .color_attachments(&color_attachment_refs)
+                .build()];
             let render_pass_create_info = vk::RenderPassCreateInfo::builder()
-                .attachments(&[color_attachment])
-                .subpasses(&[subpass])
+                .attachments(&color_attachments)
+                .subpasses(&subpasses)
                 .build();
             unsafe { device.create_render_pass(&render_pass_create_info, None).unwrap() }
         };
@@ -558,23 +559,23 @@ impl VulkanApp {
             .primitive_restart_enable(false)
             .build();
 
-        let viewport = vk::Viewport::builder()
+        let viewports = [vk::Viewport::builder()
             .x(0.0)
             .y(0.0)
             .width(swapchain_extent.width as f32)
             .height(swapchain_extent.height as f32)
             .min_depth(0.0)
             .max_depth(1.0)
-            .build();
+            .build()];
 
-        let scissor = vk::Rect2D::builder()
+        let scissors = [vk::Rect2D::builder()
             .offset(vk::Offset2D::builder().x(0).y(0).build())
             .extent(swapchain_extent)
-            .build();
+            .build()];
         
         let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
-            .viewports(&[viewport])
-            .scissors(&[scissor])
+            .viewports(&viewports)
+            .scissors(&scissors)
             .build();
 
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::builder()
@@ -592,15 +593,15 @@ impl VulkanApp {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1)
             .build();
 
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::builder()
+        let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
             .blend_enable(false)
-            .build();
+            .build()];
 
         let color_blending = vk::PipelineColorBlendStateCreateInfo::builder()
             .logic_op_enable(false)
             .logic_op(vk::LogicOp::COPY)
-            .attachments(&[color_blend_attachment])
+            .attachments(&color_blend_attachments)
             .build();
 
         let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::builder()
