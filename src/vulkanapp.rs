@@ -380,9 +380,14 @@ impl VulkanApp {
         };
 
         unsafe {
-            if swapchain.swapchain_loader.queue_present(self.queue, &present_info).expect("Failed to execute queue present.") {
-                println!("queue_present: Suboptimal swapchain!");
-                return false;
+            match swapchain.swapchain_loader.queue_present(self.queue, &present_info) {
+                Ok(is_suboptimal) if is_suboptimal == true  => {
+                    println!("queue_present: Suboptimal swapchain image");
+                },
+                Err(e) => {
+                    println!("queue_present: {}", e.to_string());
+                }
+                Ok(_) => {}
             }
         }
         return true;
@@ -412,6 +417,7 @@ impl VulkanApp {
                 surface_present_modes.first().unwrap()
             })
         });
+        println!("Present mode: {:?}", present_mode);
 
         let extent = window.get_framebuffer_size();
 
