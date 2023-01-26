@@ -64,7 +64,7 @@ impl VulkanApp {
         }
 
 
-        let entry = Entry::linked();
+        let entry = unsafe { Entry::load().unwrap() };
         //check if extensions are supported
         let mut supported = true;
         let available_extensions = entry.enumerate_instance_extension_properties(None).unwrap();
