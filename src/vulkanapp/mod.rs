@@ -1,12 +1,24 @@
+mod resourceManager;
+mod vertex;
+
+use resourceManager::ResourceManager;
+use vertex::Vertex;
+
 use std::ffi::c_void;
+use std::mem;
+use std::ptr;
+use crate::offset_of;
 
 use ash::{vk::{self, Handle, SurfaceKHR}, Entry, extensions};
-use std::ptr;
+
+
+
+use self::resourceManager::Resource;
 
 struct SyncObjects {
-    image_available_semaphore: vk::Semaphore,
-    render_finished_semaphore: vk::Semaphore,
-    in_flight_fence: vk::Fence,
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
 }
 struct SwapchainDependentResources {
     swapchain_loader: ash::extensions::khr::Swapchain,
@@ -41,8 +53,18 @@ pub struct VulkanApp {
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
 
+    resource_manager: ResourceManager,
+    resource_command_buffer: vk::CommandBuffer,
+
+    vertex_buffer: Resource,
+
     sync_objects: SyncObjects,
+
+    cur_frame: usize,
+    in_flight_frame: usize
 }
+
+const IN_FLIGHT_FRAMES: usize = 2;
 
 impl VulkanApp {
     pub fn new(glfw: &glfw::Glfw, window: &glfw::Window) -> VulkanApp {
@@ -227,18 +249,47 @@ impl VulkanApp {
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
             .build(), None).unwrap() };
         
+        let command_buffer_count = 2;
         let command_buffers = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(swapchain_dependent_stuff.swapchain_images.len() as u32)
+            .command_buffer_count(command_buffer_count)
             .build()).unwrap() };
+        
+        let mut image_available_semaphores = Vec::new();
+        let mut render_finished_semaphores = Vec::new();
 
-        let image_available_semaphore = 
-            unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() };
-        let render_finished_semaphore = 
-            unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() };
-        let in_flight_fence = 
-            unsafe { device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED).build(), None).unwrap() };
+        for _ in 0..command_buffers.len() {
+            image_available_semaphores.push(unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() });
+            render_finished_semaphores.push( unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() });
+        }
+        let mut in_flight_fences = vec![];
+        for _ in 0..IN_FLIGHT_FRAMES {
+            in_flight_fences.push(unsafe { device.create_fence(&vk::FenceCreateInfo::builder()
+                .flags(vk::FenceCreateFlags::SIGNALED)
+                .build(), None).unwrap() });
+        }
+
+
+        //prepare resources
+        let resource_command_buffer = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::builder()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1)
+            .build()).unwrap() }[0];
+
+        let mut resource_manager = ResourceManager::new(&instance, physical_device, device.clone(), queue, resource_command_buffer);
+        
+
+        let vertex_data = vec![
+            0.0 as f32, -0.5, 0.0, 1.0, 0.0, 0.0,
+            0.5, 0.5, 0.0, 0.0, 1.0, 0.0,
+            -0.5, 0.5, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let vertex_buffer = resource_manager.create_buffer(vertex_data.len() as u64 * 4 , vk::BufferUsageFlags::VERTEX_BUFFER);
+        resource_manager.fill_buffer(vertex_buffer, &vertex_data);
+
+
 
         return VulkanApp {
             entry,
@@ -252,29 +303,39 @@ impl VulkanApp {
             swapchain_dependent_resources: Some(swapchain_dependent_stuff),
             command_pool,
             command_buffers,
+
+            resource_manager,
+            resource_command_buffer,
+
+            vertex_buffer: vertex_buffer,
+
             sync_objects: SyncObjects {
-                image_available_semaphore,
-                render_finished_semaphore,
-                in_flight_fence,
-            }
+                image_available_semaphores,
+                render_finished_semaphores,
+                in_flight_fences,
+            },
+            cur_frame: 0,
+            in_flight_frame: 0,
         };
     }
 
     pub fn draw_frame(&mut self) -> bool {
+        let frame = self.cur_frame;
+        let in_flight_frame = self.in_flight_frame;
 
         let swapchain = self.swapchain_dependent_resources.as_ref().unwrap();
         let device = &self.device;
         // 1) wait for image available
         let (image_index, _is_sub_optimal) = unsafe {
-            device.wait_for_fences(&[self.sync_objects.in_flight_fence], true, std::u64::MAX).expect("Failed to wait for Fence!");
+            device.wait_for_fences(&[self.sync_objects.in_flight_fences[in_flight_frame]], true, std::u64::MAX).expect("Failed to wait for Fence!");
 
-            device.reset_fences(&[self.sync_objects.in_flight_fence]).expect("Failed to reset Fence!");
+            device.reset_fences(&[self.sync_objects.in_flight_fences[in_flight_frame]]).expect("Failed to reset Fence!");
 
             swapchain.swapchain_loader
                 .acquire_next_image(
                     swapchain.swapchain,
                     std::u64::MAX,
-                    self.sync_objects.image_available_semaphore,
+                    self.sync_objects.image_available_semaphores[frame as usize],
                     vk::Fence::null(),
                 )
                 .expect("Failed to acquire next image.")
@@ -283,6 +344,7 @@ impl VulkanApp {
             println!("acquire_next_image: Suboptimal swapchain image");
         }
 
+        // println!("frame: {}, image_index: {}", frame, image_index);
         // 2.0) record command buffer
         let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder()
             .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE)
@@ -290,7 +352,7 @@ impl VulkanApp {
 
         unsafe {
             let reset_res = device
-                .reset_command_buffer(self.command_buffers[image_index as usize], vk::CommandBufferResetFlags::empty());
+                .reset_command_buffer(self.command_buffers[frame as usize], vk::CommandBufferResetFlags::empty());
             match reset_res {
                 Ok(_) => {},
                 Err(e) => {
@@ -315,20 +377,21 @@ impl VulkanApp {
 
 
             device
-                .begin_command_buffer(self.command_buffers[image_index as usize], &command_buffer_begin_info)
+                .begin_command_buffer(self.command_buffers[frame as usize], &command_buffer_begin_info)
                 .expect("Failed to begin recording command buffer!");
             device
-                .cmd_begin_render_pass(self.command_buffers[image_index as usize], &render_pass_begin_info, vk::SubpassContents::INLINE);
+                .cmd_begin_render_pass(self.command_buffers[frame as usize], &render_pass_begin_info, vk::SubpassContents::INLINE);
+            
+            device.cmd_bind_vertex_buffers(self.command_buffers[frame as usize], 0, &[self.vertex_buffer.buffer], &[0]);
+            device
+                .cmd_bind_pipeline(self.command_buffers[frame as usize], vk::PipelineBindPoint::GRAPHICS, swapchain.graphics_pipeline);
+            device
+                .cmd_draw(self.command_buffers[frame as usize], 3, 1, 0, 0);
 
             device
-                .cmd_bind_pipeline(self.command_buffers[image_index as usize], vk::PipelineBindPoint::GRAPHICS, swapchain.graphics_pipeline);
-            device
-                .cmd_draw(self.command_buffers[image_index as usize], 3, 1, 0, 0);
-
-            device
-                .cmd_end_render_pass(self.command_buffers[image_index as usize]);
+                .cmd_end_render_pass(self.command_buffers[frame as usize]);
             let end_cb_res = device
-                .end_command_buffer(self.command_buffers[image_index as usize]);
+                .end_command_buffer(self.command_buffers[frame as usize]);
             match end_cb_res {
                 Ok(_) => {},
                 Err(e) => {
@@ -337,30 +400,25 @@ impl VulkanApp {
             }
         }
 
-
         // 2) queue submit
         let submit_infos = [vk::SubmitInfo {
             s_type: vk::StructureType::SUBMIT_INFO,
             p_next: ptr::null(),
             wait_semaphore_count: 1,
-            p_wait_semaphores: &self.sync_objects.image_available_semaphore,
+            p_wait_semaphores: &self.sync_objects.image_available_semaphores[frame as usize],
             p_wait_dst_stage_mask: &vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             command_buffer_count: 1,
-            p_command_buffers: &self.command_buffers[image_index as usize],
+            p_command_buffers: &self.command_buffers[frame as usize],
             signal_semaphore_count: 1,
-            p_signal_semaphores: &self.sync_objects.render_finished_semaphore,
+            p_signal_semaphores: &self.sync_objects.render_finished_semaphores[frame as usize],
         }];
 
         unsafe {
             device
-                .reset_fences(&[self.sync_objects.in_flight_fence])
-                .expect("Failed to reset Fence!");
-
-            device
                 .queue_submit(
                     self.queue,
                     &submit_infos,
-                    self.sync_objects.in_flight_fence,
+                    self.sync_objects.in_flight_fences[in_flight_frame],
                 )
                 .expect("Failed to execute queue submit.");
         }
@@ -372,12 +430,15 @@ impl VulkanApp {
             s_type: vk::StructureType::PRESENT_INFO_KHR,
             p_next: ptr::null(),
             wait_semaphore_count: 1,
-            p_wait_semaphores: &self.sync_objects.render_finished_semaphore,
+            p_wait_semaphores: &self.sync_objects.render_finished_semaphores[frame as usize],
             swapchain_count: 1,
             p_swapchains: swapchains.as_ptr(),
             p_image_indices: &image_index,
             p_results: ptr::null_mut(),
         };
+
+        self.cur_frame = (self.cur_frame + 1) % self.command_buffers.len();
+        self.in_flight_frame = (self.in_flight_frame + 1) % IN_FLIGHT_FRAMES;
 
         unsafe {
             match swapchain.swapchain_loader.queue_present(self.queue, &present_info) {
@@ -433,7 +494,7 @@ impl VulkanApp {
             actual_extent
         };
 
-        let image_count = surface_capabilities.min_image_count;
+        let image_count = surface_capabilities.min_image_count + 1;
 
         let swapchain_loader = extensions::khr::Swapchain::new(&instance, device);
         let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
@@ -501,9 +562,18 @@ impl VulkanApp {
                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
                 .color_attachments(&color_attachment_refs)
                 .build()];
+            let dependencies = [vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .build()];
             let render_pass_create_info = vk::RenderPassCreateInfo::builder()
                 .attachments(&color_attachments)
                 .subpasses(&subpasses)
+                .dependencies(&dependencies)
                 .build();
             unsafe { device.create_render_pass(&render_pass_create_info, None).unwrap() }
         };
@@ -551,9 +621,31 @@ impl VulkanApp {
 
         let shader_stages = [vertex_shader_stage_create_info, fragment_shader_stage_create_info];
 
+        let vertex_binding_descriptions = [vk::VertexInputBindingDescription::builder()
+            .binding(0)
+            .stride(std::mem::size_of::<Vertex>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX)
+            .build()];
+        let o1  = offset_of!(Vertex, position) as u32;
+        let o2 = offset_of!(Vertex, color) as u32;
+        let vertex_attribute_descriptions = [
+            vk::VertexInputAttributeDescription::builder()
+                .binding(0)
+                .location(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(offset_of!(Vertex, position) as u32)
+                .build(),
+            vk::VertexInputAttributeDescription::builder()
+                .binding(0)
+                .location(1)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(offset_of!(Vertex, color) as u32)
+                .build(),
+        ];
+        
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
-            .vertex_binding_descriptions(&[])
-            .vertex_attribute_descriptions(&[])
+            .vertex_binding_descriptions(&vertex_binding_descriptions)
+            .vertex_attribute_descriptions(&vertex_attribute_descriptions)
             .build();
 
         let dynamic_state_create_info = vk::PipelineDynamicStateCreateInfo::builder()
