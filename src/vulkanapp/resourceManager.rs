@@ -152,33 +152,18 @@ impl ResourceManager {
         }
         match self.host_access_policy {
             HostAccessPolicy::SingleBuffer(_) => {
+                //write to device_local
                 unsafe {
                     let mem_ptr = self.device.map_memory(resource.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).unwrap();
                     let mem_slice = std::slice::from_raw_parts_mut(mem_ptr as *mut T, data.len());
                     mem_slice.copy_from_slice(data);
                     self.device.unmap_memory(resource.memory);
                 }
-                
-                let buffer_barrier = vk::BufferMemoryBarrier::builder()
-                    .buffer(resource.buffer)
-                    .size(vk::WHOLE_SIZE)
-                    .src_access_mask(vk::AccessFlags::HOST_WRITE)
-                    .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)
-                    .build();
-
-                unsafe {
-                    self.device.cmd_pipeline_barrier(
-                        self.command_buffer,
-                        vk::PipelineStageFlags::HOST,
-                        vk::PipelineStageFlags::VERTEX_INPUT,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[buffer_barrier],
-                        &[],
-                    );
-                }
             },
             HostAccessPolicy::UseStaging { host_memory_type, device_memory_type: _ } => {
+                // write to stahing
+                // transfer staging -> device_local
+                //  transfer | vertex_input barrier
                 let staging_buffer: Resource;
                 
                 if let Some(staging) = self.staging_buffer.take() {
@@ -217,26 +202,7 @@ impl ResourceManager {
                 let copy_region = vk::BufferCopy::builder()
                     .size(size);
 
-
-
-                let buffer_memory_barrier = vk::BufferMemoryBarrier::builder()
-                    .src_access_mask(vk::AccessFlags::HOST_WRITE)
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                    .buffer(staging_buffer.buffer)
-                    .offset(0)
-                    .size(vk::WHOLE_SIZE);
-
-
                 unsafe {
-                    self.device.cmd_pipeline_barrier(
-                        self.command_buffer,
-                        vk::PipelineStageFlags::HOST,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[buffer_memory_barrier.build()],
-                        &[],
-                    );
                     self.device.cmd_copy_buffer(self.command_buffer, staging_buffer.buffer, resource.buffer, &[copy_region.build()]);
                     
                 }
