@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use ash::vk;
+use ash::vk::{self, CommandBufferUsageFlags};
 
 #[derive(Debug)]
 pub enum HostAccessPolicy {
@@ -21,13 +21,12 @@ pub struct Resource {
 pub struct ResourceManager {
     pub resources: Vec<Resource>,
     pub host_access_policy: HostAccessPolicy,
-    stagingBuffer: Option<Resource>,
+    staging_buffer: Option<Resource>,
 
-    physical_device: vk::PhysicalDevice,
     device: ash::Device,
     queue: vk::Queue,
     command_buffer: vk::CommandBuffer,
-    transfer_completed_fence: Option<vk::Fence>,
+    transfer_completed_fence: vk::Fence,
 }
 
 impl ResourceManager {
@@ -44,6 +43,7 @@ impl ResourceManager {
             }
             return false;
         });
+        
 
         let host_access_policy = match single_memory_type {
             Some((i, _)) => HostAccessPolicy::SingleBuffer(i),
@@ -81,24 +81,23 @@ impl ResourceManager {
 
         println!("Host access policy: {:?}", host_access_policy);
 
+        let fence = unsafe {device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None).unwrap()};
+
         Self {
             resources: Vec::new(),
             host_access_policy,
 
-            physical_device,
             device,
             queue,
             command_buffer,
-            stagingBuffer: None,
-            transfer_completed_fence: None,
+            staging_buffer: None,
+            transfer_completed_fence: fence,
         }
     }
 
     pub fn create_buffer(&mut self, size: vk::DeviceSize, mut usage: vk::BufferUsageFlags) -> Resource {
         if let HostAccessPolicy::UseStaging { host_memory_type: _, device_memory_type: _ } = self.host_access_policy {
             usage |= vk::BufferUsageFlags::TRANSFER_DST;
-            let fence = unsafe {self.device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None).unwrap()};
-            self.transfer_completed_fence = Some(fence);
         }
         let buffer_create_info = vk::BufferCreateInfo::builder()
             .size(size)
@@ -137,10 +136,20 @@ impl ResourceManager {
     }
 
     pub fn fill_buffer<T: Copy + Debug>(&mut self, resource: Resource, data: &[T]) {
-        //size check
+        //size checktransfer_completed_fence
         let size = (data.len() * std::mem::size_of::<T>()) as vk::DeviceSize;
         assert!(size <= resource.size);
 
+
+        unsafe {
+            self.device.wait_for_fences(&[self.transfer_completed_fence], true, std::u64::MAX).unwrap();
+            self.device.reset_fences(&[self.transfer_completed_fence]).unwrap();
+            
+
+            self.device.begin_command_buffer(self.command_buffer, 
+                &vk::CommandBufferBeginInfo::builder()
+                .flags(CommandBufferUsageFlags::ONE_TIME_SUBMIT)).unwrap();
+        }
         match self.host_access_policy {
             HostAccessPolicy::SingleBuffer(_) => {
                 unsafe {
@@ -149,16 +158,30 @@ impl ResourceManager {
                     mem_slice.copy_from_slice(data);
                     self.device.unmap_memory(resource.memory);
                 }
+                
+                let buffer_barrier = vk::BufferMemoryBarrier::builder()
+                    .buffer(resource.buffer)
+                    .size(vk::WHOLE_SIZE)
+                    .src_access_mask(vk::AccessFlags::HOST_WRITE)
+                    .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)
+                    .build();
+
+                unsafe {
+                    self.device.cmd_pipeline_barrier(
+                        self.command_buffer,
+                        vk::PipelineStageFlags::HOST,
+                        vk::PipelineStageFlags::VERTEX_INPUT,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[buffer_barrier],
+                        &[],
+                    );
+                }
             },
             HostAccessPolicy::UseStaging { host_memory_type, device_memory_type: _ } => {
-                unsafe {
-                    self.device.wait_for_fences(&[self.transfer_completed_fence.unwrap()], true, std::u64::MAX).unwrap();
-                    self.device.reset_fences(&[self.transfer_completed_fence.unwrap()]).unwrap();
-                }
-                
                 let staging_buffer: Resource;
                 
-                if let Some(staging) = self.stagingBuffer.take() {
+                if let Some(staging) = self.staging_buffer.take() {
                     staging_buffer = staging;
                 } else {
                     let buffer_create_info = vk::BufferCreateInfo::builder()
@@ -192,14 +215,9 @@ impl ResourceManager {
                 }
 
                 let copy_region = vk::BufferCopy::builder()
-                    .size((data.len() * std::mem::size_of::<T>()) as vk::DeviceSize);
+                    .size(size);
 
 
-                unsafe {
-                    self.device.begin_command_buffer(self.command_buffer, 
-                        &vk::CommandBufferBeginInfo::builder()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).unwrap();
-                }
 
                 let buffer_memory_barrier = vk::BufferMemoryBarrier::builder()
                     .src_access_mask(vk::AccessFlags::HOST_WRITE)
@@ -241,18 +259,17 @@ impl ResourceManager {
                         &[buffer_memory_barrier.build()],
                         &[],
                     );
-
-                    self.device.end_command_buffer(self.command_buffer).unwrap();
                 }
-
-                unsafe {
-                    let submit_info = vk::SubmitInfo::builder()
-                        .command_buffers(&[self.command_buffer])
-                        .build();
-                    self.device.queue_submit(self.queue, &[submit_info], self.transfer_completed_fence.unwrap()).unwrap();
-                }
-                self.stagingBuffer = Some(staging_buffer);
+                self.staging_buffer = Some(staging_buffer);
             }
+        }
+        
+        unsafe {
+            self.device.end_command_buffer(self.command_buffer).unwrap();
+            let submit_info = vk::SubmitInfo::builder()
+                .command_buffers(&[self.command_buffer])
+                .build();
+            self.device.queue_submit(self.queue, &[submit_info], self.transfer_completed_fence).unwrap();
         }
     }
     pub fn cmd_barrier_after_vertex_buffer_use(&mut self, device: &ash::Device, command_buffer: vk::CommandBuffer, vertex_buffer: &Resource) {
