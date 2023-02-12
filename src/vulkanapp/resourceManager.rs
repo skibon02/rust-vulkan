@@ -27,6 +27,7 @@ pub struct ResourceManager {
     device: ash::Device,
     queue: vk::Queue,
     command_buffer: vk::CommandBuffer,
+    transfer_completed_fence: Option<vk::Fence>,
 }
 
 impl ResourceManager {
@@ -34,7 +35,7 @@ impl ResourceManager {
         //query memory properties info
         let memory_properties = unsafe {instance.get_physical_device_memory_properties(physical_device)};
 
-        let mut single_memory_type = memory_properties.memory_types.iter().enumerate().find(|(i, memory_type)| {
+        let single_memory_type = memory_properties.memory_types.iter().enumerate().find(|(i, memory_type)| {
             if *i >= memory_properties.memory_type_count as usize {
                 return false;
             }
@@ -78,6 +79,7 @@ impl ResourceManager {
             }
         };
 
+        println!("Host access policy: {:?}", host_access_policy);
 
         Self {
             resources: Vec::new(),
@@ -88,12 +90,15 @@ impl ResourceManager {
             queue,
             command_buffer,
             stagingBuffer: None,
+            transfer_completed_fence: None,
         }
     }
 
     pub fn create_buffer(&mut self, size: vk::DeviceSize, mut usage: vk::BufferUsageFlags) -> Resource {
         if let HostAccessPolicy::UseStaging { host_memory_type: _, device_memory_type: _ } = self.host_access_policy {
             usage |= vk::BufferUsageFlags::TRANSFER_DST;
+            let fence = unsafe {self.device.create_fence(&vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED), None).unwrap()};
+            self.transfer_completed_fence = Some(fence);
         }
         let buffer_create_info = vk::BufferCreateInfo::builder()
             .size(size)
@@ -110,10 +115,10 @@ impl ResourceManager {
                     .allocation_size(memory_requirements.size)
                     .memory_type_index(memory_type as u32)
             },
-            HostAccessPolicy::UseStaging { host_memory_type, device_memory_type } => {
+            HostAccessPolicy::UseStaging { host_memory_type: _, device_memory_type } => {
                 vk::MemoryAllocateInfo::builder()
                     .allocation_size(memory_requirements.size)
-                    .memory_type_index(host_memory_type as u32)
+                    .memory_type_index(device_memory_type as u32)
             }
         };
 
@@ -146,6 +151,11 @@ impl ResourceManager {
                 }
             },
             HostAccessPolicy::UseStaging { host_memory_type, device_memory_type: _ } => {
+                unsafe {
+                    self.device.wait_for_fences(&[self.transfer_completed_fence.unwrap()], true, std::u64::MAX).unwrap();
+                    self.device.reset_fences(&[self.transfer_completed_fence.unwrap()]).unwrap();
+                }
+                
                 let staging_buffer: Resource;
                 
                 if let Some(staging) = self.stagingBuffer.take() {
@@ -239,9 +249,53 @@ impl ResourceManager {
                     let submit_info = vk::SubmitInfo::builder()
                         .command_buffers(&[self.command_buffer])
                         .build();
-                    self.device.queue_submit(self.queue, &[submit_info], vk::Fence::null()).unwrap();
+                    self.device.queue_submit(self.queue, &[submit_info], self.transfer_completed_fence.unwrap()).unwrap();
                 }
                 self.stagingBuffer = Some(staging_buffer);
+            }
+        }
+    }
+    pub fn cmd_barrier_after_vertex_buffer_use(&mut self, device: &ash::Device, command_buffer: vk::CommandBuffer, vertex_buffer: &Resource) {
+        match self.host_access_policy {
+            HostAccessPolicy::SingleBuffer(_) => {
+                let buffer_memory_barrier = vk::BufferMemoryBarrier::builder()
+                    .src_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)
+                    .dst_access_mask(vk::AccessFlags::HOST_WRITE)
+                    .buffer(vertex_buffer.buffer)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE);
+                
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::VERTEX_INPUT,
+                        vk::PipelineStageFlags::HOST,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[buffer_memory_barrier.build()],
+                        &[],
+                    );
+                }
+            },
+            HostAccessPolicy::UseStaging { host_memory_type: _, device_memory_type: _ } => {
+                let buffer_memory_barrier = vk::BufferMemoryBarrier::builder()
+                    .src_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .buffer(vertex_buffer.buffer)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE);
+                
+                unsafe {
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::VERTEX_INPUT,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[buffer_memory_barrier.build()],
+                        &[],
+                    );
+                }
             }
         }
     }

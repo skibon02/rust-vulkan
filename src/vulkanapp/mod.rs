@@ -67,7 +67,7 @@ pub struct VulkanApp {
 const IN_FLIGHT_FRAMES: usize = 2;
 
 impl VulkanApp {
-    pub fn new(glfw: &glfw::Glfw, window: &glfw::Window) -> VulkanApp {
+    pub fn new(glfw: &glfw::Glfw, window: &glfw::Window, vertex_data: &Vec<f32>) -> VulkanApp {
 
         let required_extensions = glfw.get_required_instance_extensions().unwrap().iter()
             .map(|s| s.clone()+"\0")
@@ -281,13 +281,7 @@ impl VulkanApp {
         let mut resource_manager = ResourceManager::new(&instance, physical_device, device.clone(), queue, resource_command_buffer);
         
 
-        let vertex_data = vec![
-            0.0 as f32, -0.5, 0.0, 1.0, 0.0, 0.0,
-            0.5, 0.5, 0.0, 0.0, 1.0, 0.0,
-            -0.5, 0.5, 0.0, 0.0, 0.0, 1.0,
-        ];
         let vertex_buffer = resource_manager.create_buffer(vertex_data.len() as u64 * 4 , vk::BufferUsageFlags::VERTEX_BUFFER);
-        resource_manager.fill_buffer(vertex_buffer, &vertex_data);
 
 
 
@@ -319,7 +313,7 @@ impl VulkanApp {
         };
     }
 
-    pub fn draw_frame(&mut self) -> bool {
+    pub fn draw_frame(&mut self, vertex_data: &Vec<f32>) -> bool {
         let frame = self.cur_frame;
         let in_flight_frame = self.in_flight_frame;
 
@@ -344,8 +338,12 @@ impl VulkanApp {
             println!("acquire_next_image: Suboptimal swapchain image");
         }
 
+        // 2.0) update vertex buffer
+
+        self.resource_manager.fill_buffer(self.vertex_buffer, vertex_data);
+
         // println!("frame: {}, image_index: {}", frame, image_index);
-        // 2.0) record command buffer
+        // 2.1) record command buffer
         let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder()
             .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE)
             .build();
@@ -390,6 +388,8 @@ impl VulkanApp {
 
             device
                 .cmd_end_render_pass(self.command_buffers[frame as usize]);
+            self.resource_manager.cmd_barrier_after_vertex_buffer_use(device, self.command_buffers[frame as usize], &self.vertex_buffer);
+            
             let end_cb_res = device
                 .end_command_buffer(self.command_buffers[frame as usize]);
             match end_cb_res {
@@ -400,7 +400,7 @@ impl VulkanApp {
             }
         }
 
-        // 2) queue submit
+        // 2.2) queue submit
         let submit_infos = [vk::SubmitInfo {
             s_type: vk::StructureType::SUBMIT_INFO,
             p_next: ptr::null(),
