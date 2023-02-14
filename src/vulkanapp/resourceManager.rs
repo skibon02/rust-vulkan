@@ -22,7 +22,10 @@ pub struct BufferResource {
 pub struct ImageResource {
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
-    pub size: vk::DeviceSize
+    pub size: vk::DeviceSize,
+
+    pub width: u32,
+    pub height: u32,
 }
 
 pub struct ResourceManager {
@@ -336,6 +339,8 @@ impl ResourceManager {
             image,
             memory,
             size: memory_requirements.size,
+            width,
+            height
         }
     }
 
@@ -377,8 +382,8 @@ impl ResourceManager {
                 .layer_count(1)
                 .build())
             .image_extent(vk::Extent3D {
-                width: 2,
-                height: 2,
+                width: imageResource.width,
+                height: imageResource.height,
                 depth: 1,
             });
         
@@ -418,6 +423,8 @@ impl ResourceManager {
                     .base_array_layer(0)
                     .layer_count(1)
                     .build());
+
+            self.device.cmd_pipeline_barrier(self.command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier.build()]);
             
             self.device.end_command_buffer(self.command_buffer).unwrap();
 

@@ -24,7 +24,7 @@ fn main() {
         panic!("glfw: vulkan not supported");
     }
     
-    let fullscreen = false;
+    let fullscreen = true;
 
     let (mut window, events) = match fullscreen {
         false => glfw.create_window(WIDTH, HEIGHT, TITLE, glfw::WindowMode::Windowed).unwrap(),
@@ -54,9 +54,13 @@ fn main() {
     window.set_framebuffer_size_polling(true);
 
     let mut vertex_data = vec![
-        0.0 as f32, -0.5, 0.0, 1.0, 0.0, 0.0,
-        0.5, 0.5, 0.0, 0.0, 1.0, 0.0,
-        -0.5, 0.5, 0.0, 0.0, 0.0, 1.0,
+        0.0 as f32, -0.5, 0.0, 1.0, 0.0,
+        0.5, 0.5, 0.0, 0.0, 1.0,
+        -0.5, 0.5, 0.0, 1.0, 1.0,
+
+        0.5, 0.5, 0.0, 0.0, 1.0,
+        -0.5, 0.5, 0.0, 1.0, 1.0,
+        0.8, 0.9, 0.0, 0.0, 0.0,
     ];
     let mut vulkan_app = VulkanApp::new(&glfw, &window, &vertex_data);
     
@@ -97,8 +101,10 @@ fn main() {
         // std::thread::sleep(std::time::Duration::from_millis(1));
 
         frames += 1;
-        vertex_data[0] = f32::sin(timestamp * 5.0) * 0.5;
-        vertex_data[1] = f32::cos(timestamp * 5.0) * 0.2;
+        vertex_data[0] = f32::sin(timestamp * 15.0) * 0.5;
+        vertex_data[1] = f32::cos(timestamp * 15.0) * 0.2 - 0.7;
+
+        vertex_data[29] = f32::sin(timestamp * 15.0) * 0.5;
         let end = Instant::now().duration_since(start_time).as_secs();
         if end != prev_sec {
             println!("FPS: {}", frames);

@@ -33,6 +33,8 @@ struct SwapchainDependentResources {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
+
+    descriptor_set: vk::DescriptorSet,
 }
 
 pub struct VulkanApp {
@@ -416,10 +418,13 @@ impl VulkanApp {
                 .cmd_begin_render_pass(self.command_buffers[frame as usize], &render_pass_begin_info, vk::SubpassContents::INLINE);
             
             device.cmd_bind_vertex_buffers(self.command_buffers[frame as usize], 0, &[self.vertex_buffer.buffer], &[0]);
+           
+            device.cmd_bind_descriptor_sets(self.command_buffers[frame as usize], vk::PipelineBindPoint::GRAPHICS, swapchain.pipeline_layout, 0, &[swapchain.descriptor_set], &[]);
             device
                 .cmd_bind_pipeline(self.command_buffers[frame as usize], vk::PipelineBindPoint::GRAPHICS, swapchain.graphics_pipeline);
+            
             device
-                .cmd_draw(self.command_buffers[frame as usize], 3, 1, 0, 0);
+                .cmd_draw(self.command_buffers[frame as usize], 6, 1, 0, 0);
 
             device
                 .cmd_end_render_pass(self.command_buffers[frame as usize]);
@@ -626,6 +631,54 @@ impl VulkanApp {
 
         //render pass and framebuffers are created
 
+        //create descriptor layout for combined image sampler
+        let descriptor_set_layout_bindings = [vk::DescriptorSetLayoutBinding::builder()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .build()];
+
+        let descriptor_set_layout_create_info = vk::DescriptorSetLayoutCreateInfo::builder()
+            .bindings(&descriptor_set_layout_bindings);
+        let descriptor_set_layout = unsafe { device.create_descriptor_set_layout(&descriptor_set_layout_create_info, None).unwrap() };
+
+        //create descriptor pool
+        let descriptor_pool_sizes = [vk::DescriptorPoolSize::builder()
+            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .build()];
+
+        let descriptor_pool_create_info = vk::DescriptorPoolCreateInfo::builder()
+            .max_sets(1)
+            .pool_sizes(&descriptor_pool_sizes);
+        let descriptor_pool = unsafe { device.create_descriptor_pool(&descriptor_pool_create_info, None).unwrap() };
+
+        //allocate descriptor set
+        let descriptor_set_allocate_info = vk::DescriptorSetAllocateInfo::builder()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(&[descriptor_set_layout]).build();
+
+        let descriptor_set = unsafe { device.allocate_descriptor_sets(&descriptor_set_allocate_info).unwrap() }[0];
+
+        //create descriptor image info
+        let descriptor_image_info = vk::DescriptorImageInfo::builder()
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image_view(image_view)
+            .sampler(sampler)
+            .build();
+
+        //update descriptor set
+        let descriptor_write_set = [vk::WriteDescriptorSet::builder()
+            .dst_set(descriptor_set)
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&[descriptor_image_info])
+            .build()];
+
+        unsafe { device.update_descriptor_sets(&descriptor_write_set, &[]) };
+        
         //load shaders from file
         let vertex_shader_code = std::fs::read("shaders/vert.spv").unwrap();
         let fragment_shader_code = std::fs::read("shaders/frag.spv").unwrap();
@@ -661,8 +714,8 @@ impl VulkanApp {
             .stride(std::mem::size_of::<Vertex>() as u32)
             .input_rate(vk::VertexInputRate::VERTEX)
             .build()];
-        let o1  = offset_of!(Vertex, position) as u32;
-        let o2 = offset_of!(Vertex, color) as u32;
+
+
         let vertex_attribute_descriptions = [
             vk::VertexInputAttributeDescription::builder()
                 .binding(0)
@@ -673,8 +726,8 @@ impl VulkanApp {
             vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(1)
-                .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(offset_of!(Vertex, color) as u32)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(offset_of!(Vertex, texCoord) as u32)
                 .build(),
         ];
         
@@ -716,7 +769,7 @@ impl VulkanApp {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK)
+            .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::CLOCKWISE)
             .depth_bias_enable(false)
             .build();
@@ -738,7 +791,7 @@ impl VulkanApp {
             .build();
 
         let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::builder()
-            .set_layouts(&[])
+            .set_layouts(&[descriptor_set_layout])
             .push_constant_ranges(&[])
             .build();
 
@@ -778,6 +831,8 @@ impl VulkanApp {
             swapchain_extent,
             swapchain_framebuffers: framebuffers,
             swapchain_loader: swapchain_loader,
+
+            descriptor_set
         };     
     }
     fn recreate_swapchain(&mut self, window: &glfw::Window) {
