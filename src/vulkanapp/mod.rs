@@ -13,7 +13,7 @@ use ash::{vk::{self, Handle, SurfaceKHR}, Entry, extensions};
 
 
 
-use self::resourceManager::Resource;
+use self::resourceManager::BufferResource;
 
 struct SyncObjects {
     image_available_semaphores: Vec<vk::Semaphore>,
@@ -56,7 +56,10 @@ pub struct VulkanApp {
     resource_manager: ResourceManager,
     resource_command_buffer: vk::CommandBuffer,
 
-    vertex_buffer: Resource,
+    vertex_buffer: BufferResource,
+
+    image_view: vk::ImageView,
+    sampler: vk::Sampler,
 
     sync_objects: SyncObjects,
 
@@ -241,9 +244,6 @@ impl VulkanApp {
 
         
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
-        
-        let swapchain_dependent_stuff =  VulkanApp::create_swapchain_dependent_resources(window, &entry, &instance, &physical_device, surface, &device, None); // swapchain and all dependent resources are created
-
         let command_pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
@@ -282,7 +282,39 @@ impl VulkanApp {
         
 
         let vertex_buffer = resource_manager.create_buffer(vertex_data.len() as u64 * 4 , vk::BufferUsageFlags::VERTEX_BUFFER);
+        
+        let image_path = "img.png";
+        let mut image_object = image::open(image_path).unwrap(); 
 
+        let (image_width, image_height) = (image_object.width(), image_object.height());
+        let image_size =
+            (std::mem::size_of::<u8>() as u32 * image_width * image_height * 4) as vk::DeviceSize;
+
+        let image_data = match &image_object {
+            image::DynamicImage::ImageLuma8(_)
+            | image::DynamicImage::ImageRgb8(_) => image_object.to_rgba8().into_raw(),
+            image::DynamicImage::ImageLumaA8(_)
+            | image::DynamicImage::ImageRgba8(_) => image_object.into_bytes(),
+            _ => panic!("Unsupported image format"),
+        };
+
+        if image_size <= 0 {
+            panic!("Failed to load texture image!")
+        }
+
+        let vk_image = resource_manager.create_image(image_width as u32, 
+            image_height as u32, 
+            vk::Format::R8G8B8A8_UNORM, 
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::SAMPLED);
+
+        resource_manager.fill_image(vk_image, image_data.as_slice());
+
+        let image_view = resource_manager.create_image_view(vk_image.image, vk::Format::R8G8B8A8_UNORM, vk::ImageAspectFlags::COLOR);
+
+        let sampler = resource_manager.create_sampler();
+
+        let swapchain_dependent_stuff =  VulkanApp::create_swapchain_dependent_resources(window, &entry, &instance, &physical_device, surface, &device, image_view, sampler, None); // swapchain and all dependent resources are created
 
 
         return VulkanApp {
@@ -302,6 +334,9 @@ impl VulkanApp {
             resource_command_buffer,
 
             vertex_buffer: vertex_buffer,
+
+            image_view,
+            sampler,
 
             sync_objects: SyncObjects {
                 image_available_semaphores,
@@ -454,7 +489,7 @@ impl VulkanApp {
         return true;
     }
     
-    fn create_swapchain_dependent_resources(window: &glfw::Window, entry: &ash::Entry, instance: &ash::Instance, physical_device: &vk::PhysicalDevice, surface: SurfaceKHR, device: &ash::Device, old_swapchain: Option<vk::SwapchainKHR>) -> SwapchainDependentResources {
+    fn create_swapchain_dependent_resources(window: &glfw::Window, entry: &ash::Entry, instance: &ash::Instance, physical_device: &vk::PhysicalDevice, surface: SurfaceKHR, device: &ash::Device, image_view: vk::ImageView, sampler: vk::Sampler, old_swapchain: Option<vk::SwapchainKHR>) -> SwapchainDependentResources {
 
         //query swapchain support
         let surface_loader = extensions::khr::Surface::new(entry, instance);
@@ -779,6 +814,8 @@ impl VulkanApp {
                     &self.physical_device,
                     self.surface,
                     &self.device,
+                    self.image_view,
+                    self.sampler,
                     Some(old_swapchain),
                 ));
 

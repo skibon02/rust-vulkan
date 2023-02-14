@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 ash = {version = "0.37.2", features = ["loaded"]}
 glfw = {version = "0.49.1", features = ["vulkan"]}
+image = "0.24.5"
 rand = "0.8.5"
 
 [profile.release]

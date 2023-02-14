@@ -24,7 +24,7 @@ fn main() {
         panic!("glfw: vulkan not supported");
     }
     
-    let fullscreen = true;
+    let fullscreen = false;
 
     let (mut window, events) = match fullscreen {
         false => glfw.create_window(WIDTH, HEIGHT, TITLE, glfw::WindowMode::Windowed).unwrap(),
