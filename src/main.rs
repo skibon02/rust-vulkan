@@ -54,7 +54,7 @@ fn main() {
     window.set_framebuffer_size_polling(true);
 
     let mut vertex_data = vec![
-        0.0 as f32, -0.5, 0.0, 1.0, 0.0,
+        0.0_f32, -0.5, 0.0, 1.0, 0.0,
         0.5, 0.5, 0.0, 0.0, 1.0,
         -0.5, 0.5, 0.0, 1.0, 1.0,
 
