@@ -1,6 +1,10 @@
 mod resourceManager;
 mod vertex;
 
+use ash::vk::QueryPoolCreateFlags;
+use ash::vk::QueryPoolCreateInfo;
+use ash::vk::QueryPoolCreateInfoBuilder;
+use ash::vk::QueryType;
 use resourceManager::ResourceManager;
 use vertex::Vertex;
 
@@ -66,7 +70,9 @@ pub struct VulkanApp {
     sync_objects: SyncObjects,
 
     cur_frame: usize,
-    in_flight_frame: usize
+    in_flight_frame: usize,
+
+    query_pool: vk::QueryPool,
 }
 
 const IN_FLIGHT_FRAMES: usize = 2;
@@ -219,7 +225,7 @@ impl VulkanApp {
         }).map(|(i, _)| i as u32).unwrap();
 
         let mut surface : u64 = 0;
-        window.create_window_surface(instance.handle().as_raw() as usize, 0 as *const _, &mut surface);
+        window.create_window_surface(instance.handle().as_raw() as usize, std::ptr::null(), &mut surface);
         let surface = vk::SurfaceKHR::from_raw(surface);
 
         let presentation_support = glfw.get_physical_device_presentation_support_raw(instance.handle().as_raw() as usize, physical_device.as_raw() as usize, queue_family_index);
@@ -227,7 +233,7 @@ impl VulkanApp {
             panic!("Presentation not supported");
         }
 
-        let mut device_extensions = Vec::new();
+        let mut device_extensions = vec![];
         device_extensions.push(vk::KhrSwapchainFn::name().as_ptr());
 
         let queue_create_infos = [vk::DeviceQueueCreateInfo::builder()
@@ -286,7 +292,7 @@ impl VulkanApp {
         let vertex_buffer = resource_manager.create_buffer(vertex_data.len() as u64 * 4 , vk::BufferUsageFlags::VERTEX_BUFFER);
         
         let image_path = "img.png";
-        let mut image_object = image::open(image_path).unwrap(); 
+        let image_object = image::open(image_path).unwrap(); 
 
         let (image_width, image_height) = (image_object.width(), image_object.height());
         let image_size =
@@ -300,12 +306,12 @@ impl VulkanApp {
             _ => panic!("Unsupported image format"),
         };
 
-        if image_size <= 0 {
+        if image_size == 0 {
             panic!("Failed to load texture image!")
         }
 
-        let vk_image = resource_manager.create_image(image_width as u32, 
-            image_height as u32, 
+        let vk_image = resource_manager.create_image(image_width, 
+            image_height, 
             vk::Format::R8G8B8A8_UNORM, 
             vk::ImageTiling::OPTIMAL,
             vk::ImageUsageFlags::SAMPLED);
@@ -319,7 +325,16 @@ impl VulkanApp {
         let swapchain_dependent_stuff =  VulkanApp::create_swapchain_dependent_resources(window, &entry, &instance, &physical_device, surface, &device, image_view, sampler, None); // swapchain and all dependent resources are created
 
 
-        return VulkanApp {
+        // Perform some queries
+
+        let query_pool_info = QueryPoolCreateInfo::builder()
+            .query_type(QueryType::TIMESTAMP)
+            .query_count(2)
+            .build();
+
+        let query_pool = unsafe { device.create_query_pool(&query_pool_info, None).unwrap() };
+
+        VulkanApp {
             entry,
             instance,
             debug_utils_loader,
@@ -335,7 +350,7 @@ impl VulkanApp {
             resource_manager,
             resource_command_buffer,
 
-            vertex_buffer: vertex_buffer,
+            vertex_buffer,
 
             image_view,
             sampler,
@@ -347,10 +362,12 @@ impl VulkanApp {
             },
             cur_frame: 0,
             in_flight_frame: 0,
-        };
+
+            query_pool,
+        }
     }
 
-    pub fn draw_frame(&mut self, vertex_data: &Vec<f32>) -> bool {
+    pub fn draw_frame(&mut self, vertex_data: &[f32]) -> bool {
         let frame = self.cur_frame;
         let in_flight_frame = self.in_flight_frame;
 
@@ -366,7 +383,7 @@ impl VulkanApp {
                 .acquire_next_image(
                     swapchain.swapchain,
                     std::u64::MAX,
-                    self.sync_objects.image_available_semaphores[frame as usize],
+                    self.sync_objects.image_available_semaphores[frame],
                     vk::Fence::null(),
                 )
                 .expect("Failed to acquire next image.")
@@ -382,9 +399,20 @@ impl VulkanApp {
         // println!("frame: {}, image_index: {}", frame, image_index);
         // 2.1) record command buffer
         let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE)
             .build();
 
         unsafe {
+            let reset_res = device
+                .reset_command_buffer(self.command_buffers[frame], vk::CommandBufferResetFlags::empty());
+            match reset_res {
+                Ok(_) => {},
+                Err(e) => {
+                    panic!("Failed to reset command buffer: {}", e);
+                }
+            }
+
+
             let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
                 .render_pass(swapchain.render_pass)
                 .framebuffer(swapchain.swapchain_framebuffers[image_index as usize])
@@ -401,30 +429,34 @@ impl VulkanApp {
 
 
             device
-                .begin_command_buffer(self.command_buffers[frame as usize], &command_buffer_begin_info)
+                .begin_command_buffer(self.command_buffers[frame], &command_buffer_begin_info)
                 .expect("Failed to begin recording command buffer!");
+
+            device.cmd_reset_query_pool(self.command_buffers[frame], self.query_pool, 0, 2);
+            device.cmd_write_timestamp(self.command_buffers[frame], vk::PipelineStageFlags::TOP_OF_PIPE, self.query_pool, 0);
             device
-                .cmd_begin_render_pass(self.command_buffers[frame as usize], &render_pass_begin_info, vk::SubpassContents::INLINE);
+                .cmd_begin_render_pass(self.command_buffers[frame], &render_pass_begin_info, vk::SubpassContents::INLINE);
             
-            device.cmd_bind_vertex_buffers(self.command_buffers[frame as usize], 0, &[self.vertex_buffer.buffer], &[0]);
+            device.cmd_bind_vertex_buffers(self.command_buffers[frame], 0, &[self.vertex_buffer.buffer], &[0]);
            
-            device.cmd_bind_descriptor_sets(self.command_buffers[frame as usize], vk::PipelineBindPoint::GRAPHICS, swapchain.pipeline_layout, 0, &[swapchain.descriptor_set], &[]);
+            device.cmd_bind_descriptor_sets(self.command_buffers[frame], vk::PipelineBindPoint::GRAPHICS, swapchain.pipeline_layout, 0, &[swapchain.descriptor_set], &[]);
             device
-                .cmd_bind_pipeline(self.command_buffers[frame as usize], vk::PipelineBindPoint::GRAPHICS, swapchain.graphics_pipeline);
+                .cmd_bind_pipeline(self.command_buffers[frame], vk::PipelineBindPoint::GRAPHICS, swapchain.graphics_pipeline);
             
             device
-                .cmd_draw(self.command_buffers[frame as usize], 6, 1, 0, 0);
+                .cmd_draw(self.command_buffers[frame], 6, 1, 0, 0);
 
             device
-                .cmd_end_render_pass(self.command_buffers[frame as usize]);
-            self.resource_manager.cmd_barrier_after_vertex_buffer_use(device, self.command_buffers[frame as usize], &self.vertex_buffer);
+                .cmd_end_render_pass(self.command_buffers[frame]);
+            self.resource_manager.cmd_barrier_after_vertex_buffer_use(device, self.command_buffers[frame], &self.vertex_buffer);
+            device.cmd_write_timestamp(self.command_buffers[frame], vk::PipelineStageFlags::BOTTOM_OF_PIPE, self.query_pool, 1);
             
             let end_cb_res = device
-                .end_command_buffer(self.command_buffers[frame as usize]);
+                .end_command_buffer(self.command_buffers[frame]);
             match end_cb_res {
                 Ok(_) => {},
                 Err(e) => {
-                    panic!("Failed to end recording command buffer: {}", e.to_string());
+                    panic!("Failed to end recording command buffer: {}", e);
                 }
             }
         }
@@ -434,12 +466,12 @@ impl VulkanApp {
             s_type: vk::StructureType::SUBMIT_INFO,
             p_next: ptr::null(),
             wait_semaphore_count: 1,
-            p_wait_semaphores: &self.sync_objects.image_available_semaphores[frame as usize],
+            p_wait_semaphores: &self.sync_objects.image_available_semaphores[frame],
             p_wait_dst_stage_mask: &vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             command_buffer_count: 1,
-            p_command_buffers: &self.command_buffers[frame as usize],
+            p_command_buffers: &self.command_buffers[frame],
             signal_semaphore_count: 1,
-            p_signal_semaphores: &self.sync_objects.render_finished_semaphores[frame as usize],
+            p_signal_semaphores: &self.sync_objects.render_finished_semaphores[frame],
         }];
 
         unsafe {
@@ -459,28 +491,41 @@ impl VulkanApp {
             s_type: vk::StructureType::PRESENT_INFO_KHR,
             p_next: ptr::null(),
             wait_semaphore_count: 1,
-            p_wait_semaphores: &self.sync_objects.render_finished_semaphores[frame as usize],
+            p_wait_semaphores: &self.sync_objects.render_finished_semaphores[frame],
             swapchain_count: 1,
             p_swapchains: swapchains.as_ptr(),
             p_image_indices: &image_index,
             p_results: ptr::null_mut(),
         };
 
+        // get timestamps
+        let mut timestamps = [0u64; 2];
+        unsafe {
+            device.get_query_pool_results(
+                self.query_pool,
+                0,
+                2,
+                &mut timestamps,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+            ).expect("Failed to get query pool results!");
+        }
+        println!("Timestamps difference: {}ns", timestamps[1] - timestamps[0]);
+
         self.cur_frame = (self.cur_frame + 1) % self.command_buffers.len();
         self.in_flight_frame = (self.in_flight_frame + 1) % IN_FLIGHT_FRAMES;
 
         unsafe {
             match swapchain.swapchain_loader.queue_present(self.queue, &present_info) {
-                Ok(is_suboptimal) if is_suboptimal == true  => {
+                Ok(is_suboptimal) if is_suboptimal  => {
                     println!("queue_present: Suboptimal swapchain image");
                 },
                 Err(e) => {
-                    println!("queue_present: {}", e.to_string());
+                    println!("queue_present: {}", e);
                 }
                 Ok(_) => {}
             }
         }
-        return true;
+        true
     }
     
     fn create_swapchain_dependent_resources(window: &glfw::Window, entry: &ash::Entry, instance: &ash::Instance, physical_device: &vk::PhysicalDevice, surface: SurfaceKHR, device: &ash::Device, image_view: vk::ImageView, sampler: vk::Sampler, old_swapchain: Option<vk::SwapchainKHR>) -> SwapchainDependentResources {
@@ -525,7 +570,7 @@ impl VulkanApp {
 
         let image_count = surface_capabilities.min_image_count + 1;
 
-        let swapchain_loader = extensions::khr::Swapchain::new(&instance, device);
+        let swapchain_loader = extensions::khr::Swapchain::new(instance, device);
         let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
             .surface(surface)
             .min_image_count(image_count)
@@ -814,21 +859,21 @@ impl VulkanApp {
         }
 
         
-        return SwapchainDependentResources { 
+        SwapchainDependentResources { 
             render_pass,
             graphics_pipeline: graphics_pipelines[0],
             pipeline_layout,
 
-            swapchain: swapchain,
-            swapchain_images: swapchain_images,
+            swapchain,
+            swapchain_images,
             swapchain_imageviews,
             swapchain_format: surface_format.format,
             swapchain_extent,
             swapchain_framebuffers: framebuffers,
-            swapchain_loader: swapchain_loader,
+            swapchain_loader,
 
             descriptor_set
-        };     
+        }     
     }
     fn recreate_swapchain(&mut self, window: &glfw::Window) {
         let (mut w, mut h) = window.get_framebuffer_size();
@@ -858,7 +903,7 @@ impl VulkanApp {
                 let old_swapchain = swapchain_dependent_resources.swapchain;
 
                 self.swapchain_dependent_resources = Some(VulkanApp::create_swapchain_dependent_resources(
-                    &window,
+                    window,
                     &self.entry,
                     &self.instance,
                     &self.physical_device,
