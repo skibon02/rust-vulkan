@@ -382,20 +382,9 @@ impl VulkanApp {
         // println!("frame: {}, image_index: {}", frame, image_index);
         // 2.1) record command buffer
         let command_buffer_begin_info = vk::CommandBufferBeginInfo::builder()
-            .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE)
             .build();
 
         unsafe {
-            let reset_res = device
-                .reset_command_buffer(self.command_buffers[frame as usize], vk::CommandBufferResetFlags::empty());
-            match reset_res {
-                Ok(_) => {},
-                Err(e) => {
-                    panic!("Failed to reset command buffer: {}", e.to_string());
-                }
-            }
-
-
             let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
                 .render_pass(swapchain.render_pass)
                 .framebuffer(swapchain.swapchain_framebuffers[image_index as usize])
